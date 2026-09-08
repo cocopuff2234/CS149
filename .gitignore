@@ -1,0 +1,15 @@
+# macOS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Binaries and object files
+*.o
+*.out
+*.exe
+*.dSYM/
+
+# Build artifacts
+countnames
