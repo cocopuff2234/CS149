@@ -9,7 +9,7 @@ distinct name appears. Empty lines are skipped and reported on stderr.
 ## How to compile
 
 ```
-gcc -o countnames countnames.c -Wall -Werror
+gcc -o countnames Assignment1/countnames.c -Wall -Werror
 ```
 
 This produces a single executable named `countnames` with no warnings or errors.
@@ -19,7 +19,7 @@ This produces a single executable named `countnames` with no warnings or errors.
 With a filename (argc == 2):
 
 ```
-./countnames test/names.txt
+./countnames Assignment1/test/names.txt
 ```
 
 From stdin (argc == 1):
@@ -29,8 +29,8 @@ cat test/names.txt | ./countnames
 ./countnames < test/names.txt
 ```
 
-To see only stdout: `./countnames test/names.txt 2> /dev/null`
-To see only stderr: `./countnames test/names.txt > /dev/null`
+To see only stdout: `./countnames Assignment1/test/names.txt 2> /dev/null`
+To see only stderr: `./countnames Assignment1/test/names.txt > /dev/null`
 To check the exit code: `echo $?`
 
 ## Test cases
@@ -41,7 +41,7 @@ Tests: the basic case — repeated names, names containing spaces, and empty
 lines (line 2 and the trailing empty line) that must be ignored and reported.
 
 ```
-$ ./countnames test/names.txt
+$ ./countnames Assignment1/test/names.txt
 Warning - Line 2 is empty.
 Warning - Line 9 is empty.
 Nicky: 1
@@ -61,7 +61,7 @@ Tests: a file with no names at all (0 bytes). The program should print
 nothing and exit with status 0.
 
 ```
-$ ./countnames test/empty.txt
+$ ./countnames Assignment1/test/empty.txt
 $ echo $?
 0
 ```
@@ -83,7 +83,7 @@ spaces) are different names, and a line containing only one space or only two
 spaces is a valid (non-empty) name, not an empty line.
 
 ```
-$ ./countnames test/whitespace.txt
+$ ./countnames Assignment1/test/whitespace.txt
   : 1
  : 1
 Tom Wu: 2
@@ -100,7 +100,7 @@ Tests: the last line is still read and counted correctly even when the file
 does not end with `\n` (fgets returns it without a newline).
 
 ```
-$ ./countnames test/no_trailing_newline.txt
+$ ./countnames Assignment1/test/no_trailing_newline.txt
 Bob: 1
 Ann: 2
 $ echo $?
@@ -116,7 +116,7 @@ processed correctly. The result can be verified against
 `sort test/big.txt | uniq -c`.
 
 ```
-$ ./countnames test/big.txt | sort
+$ ./countnames Assignment1/test/big.txt | sort
 Alice: 1041
 Bob: 1058
 Carol: 959
@@ -132,7 +132,7 @@ Tests: fopen() failure. The program prints the exact error message and exits
 with status 1.
 
 ```
-$ ./countnames does_not_exist.txt
+$ ./countnames Assignment1/does_not_exist.txt
 error: cannot open file
 $ echo $?
 1
