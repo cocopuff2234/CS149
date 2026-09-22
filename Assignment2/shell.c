@@ -15,12 +15,37 @@
 // define maxargs, the max number of words/files in a command
 #define MAXARGS 100
 
+/*
+ * report_child_status - print how a finished child ended.
+ *
+ * Uses the wait() status macros so we can tell a normal exit (and its
+ * exit code) apart from a child that was killed by a signal.
+ */
+static void
+report_child_status(pid_t pid, int status)
+{
+    if (WIFEXITED(status)) {
+        // child called exit()/returned from main; WEXITSTATUS is its exit code
+        printf("child %d exited with status %d\n",
+               (int)pid, WEXITSTATUS(status));
+    }
+    else if (WIFSIGNALED(status)) {
+        // child was terminated by a signal (e.g. SIGSEGV, SIGKILL)
+        printf("child %d was killed by signal %d\n",
+               (int)pid, WTERMSIG(status));
+    }
+    else {
+        // stopped/continued; should not happen with plain wait()
+        printf("child %d ended abnormally\n", (int)pid);
+    }
+}
+
 int
 main(void)
 {
     char buf[MAXLINE];
 
-    printf("%% ");	/* print prompt (printf requires %% to print %) */
+    printf("%% ");  /* print prompt (printf requires %% to print %) */
     fflush(stdout);
 
     while (fgets(buf, MAXLINE, stdin) != NULL) {
@@ -52,15 +77,26 @@ main(void)
         // end of argument array
         args[arg_count] = NULL;
 
-        // edge case: user only pressed Enter
+        // edge case: user only pressed Enter (or typed only whitespace)
         if (arg_count == 0) {
             printf("%% ");
             fflush(stdout);
             continue;
         }
 
-        // initialize child count at 0
-        int child_count = 0;
+        /*
+         * Check that the command is executable BEFORE forking. If we waited
+         * for execvp() to fail inside the child, stderr would already be
+         * redirected into PID.err and we would leave behind empty PID.out /
+         * PID.err files for every argument. access() lets us report the
+         * problem once, on the real terminal, and skip forking entirely.
+         */
+        if (access(args[0], X_OK) != 0) {
+            fprintf(stderr, "error: cannot execute %s\n", args[0]);
+            printf("%% ");
+            fflush(stdout);
+            continue;
+        }
 
         /*
          * Normally, each filename gets one child process.
@@ -73,6 +109,13 @@ main(void)
             job_count = 1;
         }
 
+        // count of children actually created, so we know how many to wait for
+        int child_count = 0;
+
+        // make sure nothing buffered in the parent leaks into the children
+        fflush(stdout);
+        fflush(stderr);
+
         // iterate through input files and make one child per file
         for (int i = 0; i < job_count; i++) {
             // start child process
@@ -83,6 +126,8 @@ main(void)
                 perror("fork failed");
             }
             else if (pid == 0) {
+                /* ---------- child ---------- */
+
                 // store names for this child's output/error files
                 char out_name[64];
                 char err_name[64];
@@ -127,10 +172,10 @@ main(void)
 
                 /*
                  * When filenames exist, child_args becomes:
-                 * "./countnames", "names1.txt", NULL
+                 *   "./countnames", "names1.txt", NULL
                  *
                  * With no filenames, it becomes:
-                 * "./countnames", NULL
+                 *   "./countnames", NULL
                  * so countnames reads from stdin.
                  */
                 char *child_args[3];
@@ -149,21 +194,33 @@ main(void)
                 // replace this child process with countnames
                 execvp(child_args[0], child_args);
 
-                // execvp only returns if it failed
+                // execvp only returns if it failed (goes to PID.err)
                 perror("execvp failed");
                 _exit(127);
             }
             else {
-                // parent successfully created one child
+                /* ---------- parent ---------- */
+                // parent successfully created one child; keep going, do NOT
+                // wait here or the children would run one after another
                 child_count++;
             }
         }
 
-        // wait only after every child has been created
+        /*
+         * Wait only after every child has been created. wait() returns
+         * whichever child finishes first, so a slow file does not hold up
+         * the others. Loop until all children have been collected.
+         */
         for (int i = 0; i < child_count; i++) {
-            if (wait(NULL) < 0) {
+            int status;
+            pid_t done = wait(&status);
+
+            if (done < 0) {
                 perror("wait failed");
+                break;
             }
+
+            report_child_status(done, status);
         }
 
         printf("%% ");
