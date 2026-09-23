@@ -13,3 +13,10 @@
 
 # Build artifacts
 countnames
+
+# Assignment 2 generated files
+Assignment2/shell
+Assignment2/countnames
+Assignment2/shell.dSYM/
+Assignment2/*.out
+Assignment2/*.err

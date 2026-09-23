@@ -1,3 +1,13 @@
+/**
+ * Description: Shell script that runs countnames on input files, creates child 
+ * processes for each input file, and redirects output and error to PID.out and 
+ * PID.err files.
+ * Author names: Erik Thompson, Ryuto Kawabata
+ * Author emails: erik.thompson@sjsu.edu, ryuto.kawabata@sjsu.edu
+ * Last modified date: 09/23/2026
+ * Creation date: 09/207/2026
+ **/
+
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
