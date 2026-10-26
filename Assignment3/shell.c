@@ -1,16 +1,19 @@
 /**
  * Description: Shell that runs countnames on input files. One child process
  * is created per input file (all run in parallel), each child's stdout and
- * stderr are redirected to PID.out and PID.err, and every child sends its
- * (name, count) results back to the shell through a shared pipe. After all
- * children finish, the shell sums the counts over all files and prints the
- * totals to stdout.
+ * stderr are redirected to PID.out and PID.err, and every child writes its
+ * (name, count) results into its assigned region of shared memory. After all
+ * children finish, the shell will sum the counts over all files and print
+ * the totals to stdout.
  * Author names: Erik Thompson, Ryuto Kawabata
  * Author emails: erik.thompson@sjsu.edu, ryuto.kawabata@sjsu.edu
  * Last modified date: 10/03/2026
  * Creation date: 10/01/2026
  **/
 
+#define _POSIX_C_SOURCE 200809L
+
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -31,7 +34,7 @@
 #define MAX_NAME_LEN 30
 
 // max number of names in a region of memory
-# define MAX_NAMES 1000
+#define MAX_NAMES 1000
 
 // name for shared memory object
 #define SHM_NAME "/countnames_shared_memory"
@@ -78,6 +81,7 @@ add_total(struct Total **head, const char *name, int count)
         perror("malloc failed");
         return;
     }
+
     strncpy(node->name, name, MAX_NAME_LEN);
     node->name[MAX_NAME_LEN] = '\0';
     node->count = count;
@@ -98,14 +102,18 @@ read_record(int fd, NameCountData *data)
 
     while (got < sizeof(*data)) {
         ssize_t n = read(fd, p + got, sizeof(*data) - got);
+
         if (n == 0) {
             return 0;          // EOF: every write end has been closed
         }
+
         if (n < 0) {
             return -1;
         }
+
         got += n;
     }
+
     return 1;
 }
 
@@ -151,6 +159,7 @@ main(void)
             arg_count++;
             token = strtok(NULL, " \t");
         }
+
         args[arg_count] = NULL;
 
         // edge case: user only pressed Enter (or typed only whitespace)
@@ -170,20 +179,28 @@ main(void)
 
         // one child per filename; with no filename, one child reading stdin
         int job_count = arg_count - 1;
+
         if (arg_count == 1) {
             job_count = 1;
         }
 
-        /* Shared memory: each child gets a region, and final is a sum of all of them */
+        /*
+         * Shared memory: each child gets a region, and final is a sum of all
+         * of them.
+         */
         size_t region_size = MAX_NAMES * sizeof(NameCountData);
         size_t total_size = (job_count + 1) * region_size;
 
-        /*Shared memory: create shared memory object */
+        /*
+         * Shared memory: create shared memory object.
+         */
         int shm_fd = shm_open(
-            SHM_NAME, O_CREAT | O_RDWR, 0600
+            SHM_NAME,
+            O_CREAT | O_RDWR,
+            0600
         );
 
-        if (shm_fd == -1){
+        if (shm_fd == -1) {
             perror("shm_open failed");
             printf("%% ");
             fflush(stdout);
@@ -210,8 +227,33 @@ main(void)
             0
         );
 
-        if (GLOBAL == MAP_FAILED){
+        if (GLOBAL == MAP_FAILED) {
             perror("mmap failed");
+            close(shm_fd);
+            shm_unlink(SHM_NAME);
+            printf("%% ");
+            fflush(stdout);
+            continue;
+        }
+
+        /*
+         * Make sure shm_fd remains open after execvp().
+         */
+        int fd_flags = fcntl(shm_fd, F_GETFD);
+
+        if (fd_flags == -1) {
+            perror("fcntl F_GETFD failed");
+            munmap(GLOBAL, total_size);
+            close(shm_fd);
+            shm_unlink(SHM_NAME);
+            printf("%% ");
+            fflush(stdout);
+            continue;
+        }
+
+        if (fcntl(shm_fd, F_SETFD, fd_flags & ~FD_CLOEXEC) == -1) {
+            perror("fcntl F_SETFD failed");
+            munmap(GLOBAL, total_size);
             close(shm_fd);
             shm_unlink(SHM_NAME);
             printf("%% ");
@@ -222,27 +264,34 @@ main(void)
         // initialize NameCountData to empty
         NameCountData *global_data = (NameCountData *)GLOBAL;
 
-        for (size_t i = 0; i < total_size / sizeof(NameCountData); i++){
+        for (size_t i = 0;
+             i < total_size / sizeof(NameCountData);
+             i++) {
             global_data[i].name[0] = '\0';
             global_data[i].count = 0;
         }
 
         /*
-         * Create ONE pipe for this command, before forking, so that every
-         * child inherits it. pipe_fd[0] = read end (parent), pipe_fd[1] =
-         * write end (children).
+         * Convert shared-memory information into strings.
          */
-        int pipe_fd[2];
-        if (pipe(pipe_fd) < 0) {
-            perror("pipe failed");
-            printf("%% ");
-            fflush(stdout);
-            continue;
-        }
+        char shm_fd_arg[32];
+        char total_size_arg[32];
+        char max_names_arg[32];
 
-        // the write end as a string, passed to countnames as an argument
-        char pipe_arg[16];
-        snprintf(pipe_arg, sizeof(pipe_arg), "%d", pipe_fd[1]);
+        snprintf(shm_fd_arg,
+                 sizeof(shm_fd_arg),
+                 "%d",
+                 shm_fd);
+
+        snprintf(total_size_arg,
+                 sizeof(total_size_arg),
+                 "%zu",
+                 total_size);
+
+        snprintf(max_names_arg,
+                 sizeof(max_names_arg),
+                 "%d",
+                 MAX_NAMES);
 
         // count of children actually created
         int child_count = 0;
@@ -253,6 +302,18 @@ main(void)
 
         // iterate through input files and make one child per file
         for (int i = 0; i < job_count; i++) {
+            /*
+             * Each child receives its own region inside GLOBAL.
+             */
+            size_t child_offset = i * region_size;
+
+            char child_offset_arg[32];
+
+            snprintf(child_offset_arg,
+                     sizeof(child_offset_arg),
+                     "%zu",
+                     child_offset);
+
             pid_t pid = fork();
 
             if (pid < 0) {
@@ -261,22 +322,43 @@ main(void)
             else if (pid == 0) {
                 /* ---------- child ---------- */
 
-                // the child only writes to the pipe, so close the read end
-                close(pipe_fd[0]);
-
                 // create PID.out and PID.err (same as A2)
                 char out_name[64];
                 char err_name[64];
-                snprintf(out_name, sizeof(out_name), "%d.out", (int)getpid());
-                snprintf(err_name, sizeof(err_name), "%d.err", (int)getpid());
 
-                int out_fd = open(out_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                int err_fd = open(err_name, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                snprintf(out_name,
+                         sizeof(out_name),
+                         "%d.out",
+                         (int)getpid());
+
+                snprintf(err_name,
+                         sizeof(err_name),
+                         "%d.err",
+                         (int)getpid());
+
+                int out_fd = open(
+                    out_name,
+                    O_WRONLY | O_CREAT | O_TRUNC,
+                    0644
+                );
+
+                int err_fd = open(
+                    err_name,
+                    O_WRONLY | O_CREAT | O_TRUNC,
+                    0644
+                );
 
                 if (out_fd < 0 || err_fd < 0) {
                     perror("open failed");
-                    if (out_fd >= 0) close(out_fd);
-                    if (err_fd >= 0) close(err_fd);
+
+                    if (out_fd >= 0) {
+                        close(out_fd);
+                    }
+
+                    if (err_fd >= 0) {
+                        close(err_fd);
+                    }
+
                     _exit(1);
                 }
 
@@ -285,26 +367,29 @@ main(void)
                     perror("dup2 stdout failed");
                     _exit(1);
                 }
+
                 if (dup2(err_fd, STDERR_FILENO) < 0) {
                     perror("dup2 stderr failed");
                     _exit(1);
                 }
+
                 close(out_fd);
                 close(err_fd);
 
                 /*
-                 * child_args becomes:
-                 *   "./countnames", "names1.txt", "<pipe write fd>", NULL
-                 * or, with no filename ("-" means read stdin):
-                 *   "./countnames", "-", "<pipe write fd>", NULL
-                 * The pipe fd stays open across exec, so countnames can
-                 * write() its results to it.
+                 * countnames arguments:
+                 *
+                 * countnames input_file shm_fd total_size offset max_names
                  */
-                char *child_args[4];
+                char *child_args[7];
+
                 child_args[0] = args[0];
                 child_args[1] = (arg_count == 1) ? "-" : args[i + 1];
-                child_args[2] = pipe_arg;
-                child_args[3] = NULL;
+                child_args[2] = shm_fd_arg;
+                child_args[3] = total_size_arg;
+                child_args[4] = child_offset_arg;
+                child_args[5] = max_names_arg;
+                child_args[6] = NULL;
 
                 execvp(child_args[0], child_args);
 
@@ -314,55 +399,36 @@ main(void)
             }
             else {
                 /* ---------- parent ---------- */
+
                 // do NOT wait here: keep forking so children run in parallel
                 child_count++;
             }
         }
 
         /*
-         * The parent never writes, so close its write end NOW. Otherwise
-         * read() would never see EOF, because the parent itself would still
-         * count as a potential writer.
-         */
-        close(pipe_fd[1]);
-
-        /*
-         * Read records from the pipe until EOF (all children have exited or
-         * closed their write ends) and sum the counts per name. We read
-         * BEFORE waiting so that a child with many names cannot block on a
-         * full pipe while the parent is stuck in wait().
-         */
-        struct Total *totals = NULL;
-        NameCountData data;
-        int r;
-
-        while ((r = read_record(pipe_fd[0], &data)) > 0) {
-            data.name[MAX_NAME_LEN] = '\0';   // defensive: ensure termination
-            add_total(&totals, data.name, data.count);
-        }
-        if (r < 0) {
-            perror("read from pipe failed");
-        }
-        close(pipe_fd[0]);
-
-        /*
          * Collect every child. wait() returns whichever child finishes
-         * first; it returns -1 when there are no children left.
+         * first.
          */
         int status;
         pid_t done;
-        while ((done = wait(&status)) > 0) {
+        int waited = 0;
+
+        while (waited < child_count &&
+               (done = wait(&status)) > 0) {
             report_child_status(done, status);
+            waited++;
         }
 
-        // print the combined counts over all files, then free the list
-        struct Total *node = totals;
-        while (node != NULL) {
-            printf("%s: %d\n", node->name, node->count);
-            struct Total *temp = node;
-            node = node->next;
-            free(temp);
-        }
+        /*
+         * Shared-memory aggregation will be added here.
+         */
+
+        /*
+         * Clean up the shared-memory mapping after all children finish.
+         */
+        munmap(GLOBAL, total_size);
+        close(shm_fd);
+        shm_unlink(SHM_NAME);
 
         printf("%% ");
         fflush(stdout);
