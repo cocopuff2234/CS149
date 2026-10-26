@@ -2,12 +2,11 @@
  * Description: Shell that runs countnames on input files. One child process
  * is created per input file (all run in parallel), each child's stdout and
  * stderr are redirected to PID.out and PID.err, and every child writes its
- * (name, count) results into its assigned region of shared memory. After all
- * children finish, the shell will sum the counts over all files and print
- * the totals to stdout.
+ * (name, count) results directly into the shared summation region. After all
+ * children finish, the shell prints the totals to stdout.
  * Author names: Erik Thompson, Ryuto Kawabata
  * Author emails: erik.thompson@sjsu.edu, ryuto.kawabata@sjsu.edu
- * Last modified date: 10/03/2026
+ * Last modified date: 10/26/2026
  * Creation date: 10/01/2026
  **/
 
@@ -20,9 +19,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-// new headers needed, mman gives us mmap()
+// new headers needed, mman gives us mmap(), semaphore for synchronization
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <semaphore.h>
 
 // define maxline since we arent using apue.h
 #define MAXLINE 1024
@@ -38,6 +38,9 @@
 
 // name for shared memory object
 #define SHM_NAME "/countnames_shared_memory"
+
+// define semaphore name
+#define SEM_NAME "/countnames_semaphore"
 
 /*
  * Record received from each child through the pipe (must match countnames.c).
@@ -273,10 +276,34 @@ main(void)
         }
 
         /*
+         * Create a named semaphore so only one child updates the shared
+         * summation region at a time.
+         */
+        sem_unlink(SEM_NAME);
+
+        sem_t *lock = sem_open(
+            SEM_NAME,
+            O_CREAT,
+            0600,
+            1
+        );
+
+        if (lock == SEM_FAILED) {
+            perror("sem_open failed");
+            munmap(GLOBAL, total_size);
+            close(shm_fd);
+            shm_unlink(SHM_NAME);
+            printf("%% ");
+            fflush(stdout);
+            continue;
+        }
+
+        /*
          * Convert shared-memory information into strings.
          */
         char shm_fd_arg[32];
         char total_size_arg[32];
+        char summation_offset_arg[32];
         char max_names_arg[32];
 
         snprintf(shm_fd_arg,
@@ -288,6 +315,11 @@ main(void)
                  sizeof(total_size_arg),
                  "%zu",
                  total_size);
+
+        snprintf(summation_offset_arg,
+                 sizeof(summation_offset_arg),
+                 "%zu",
+                 summation_offset);
 
         snprintf(max_names_arg,
                  sizeof(max_names_arg),
@@ -303,18 +335,6 @@ main(void)
 
         // iterate through input files and make one child per file
         for (int i = 0; i < job_count; i++) {
-            /*
-             * Each child receives its own region inside GLOBAL.
-             */
-            size_t child_offset = i * region_size;
-
-            char child_offset_arg[32];
-
-            snprintf(child_offset_arg,
-                     sizeof(child_offset_arg),
-                     "%zu",
-                     child_offset);
-
             pid_t pid = fork();
 
             if (pid < 0) {
@@ -380,17 +400,19 @@ main(void)
                 /*
                  * countnames arguments:
                  *
-                 * countnames input_file shm_fd total_size offset max_names
+                 * countnames input_file shm_fd total_size
+                 * summation_offset max_names semaphore_name
                  */
-                char *child_args[7];
+                char *child_args[8];
 
                 child_args[0] = args[0];
                 child_args[1] = (arg_count == 1) ? "-" : args[i + 1];
                 child_args[2] = shm_fd_arg;
                 child_args[3] = total_size_arg;
-                child_args[4] = child_offset_arg;
+                child_args[4] = summation_offset_arg;
                 child_args[5] = max_names_arg;
-                child_args[6] = NULL;
+                child_args[6] = (char *)SEM_NAME;
+                child_args[7] = NULL;
 
                 execvp(child_args[0], child_args);
 
@@ -421,87 +443,31 @@ main(void)
         }
 
         /*
-         * Aggregate all child regions into the summation region.
+         * The children have already aggregated their results directly into
+         * the summation region. The parent only prints the final results.
          */
         NameCountData *summation =
             (NameCountData *)((char *)GLOBAL + summation_offset);
 
-        int summation_count = 0;
-
-        for (int child = 0; child < job_count; child++) {
-            NameCountData *child_data =
-                (NameCountData *)((char *)GLOBAL +
-                                  child * region_size);
-
-            /*
-             * Read this child's records until an empty name is found.
-             */
-            for (int i = 0; i < MAX_NAMES; i++) {
-                if (child_data[i].name[0] == '\0') {
-                    break;
-                }
-
-                int found = 0;
-
-                /*
-                 * Search for this name in the summation region.
-                 */
-                for (int j = 0; j < summation_count; j++) {
-                    if (strcmp(summation[j].name,
-                               child_data[i].name) == 0) {
-                        summation[j].count += child_data[i].count;
-                        found = 1;
-                        break;
-                    }
-                }
-
-                /*
-                 * If the name was not found, add a new record.
-                 */
-                if (!found) {
-                    if (summation_count >= MAX_NAMES - 1) {
-                        fprintf(stderr,
-                                "error: summation region is full\n");
-                        break;
-                    }
-
-                    memset(&summation[summation_count],
-                           0,
-                           sizeof(NameCountData));
-
-                    strncpy(summation[summation_count].name,
-                            child_data[i].name,
-                            MAX_NAME_LEN);
-
-                    summation[summation_count]
-                        .name[MAX_NAME_LEN] = '\0';
-
-                    summation[summation_count].count =
-                        child_data[i].count;
-
-                    summation_count++;
-                }
-            }
-        }
-
-        /*
-         * Mark the end of the summation records.
-         */
-        summation[summation_count].name[0] = '\0';
-        summation[summation_count].count = 0;
-
         /*
          * Print the final combined results.
          */
-        for (int i = 0; i < summation_count; i++) {
+        for (int i = 0; i < MAX_NAMES; i++) {
+            if (summation[i].name[0] == '\0') {
+                break;
+            }
+
             printf("%s: %d\n",
                    summation[i].name,
                    summation[i].count);
         }
 
         /*
-         * Clean up the shared-memory mapping after all children finish.
+         * Clean up the semaphore and shared-memory mapping after all
+         * children finish.
          */
+        sem_close(lock);
+        sem_unlink(SEM_NAME);
         munmap(GLOBAL, total_size);
         close(shm_fd);
         shm_unlink(SHM_NAME);
