@@ -190,6 +190,7 @@ main(void)
          */
         size_t region_size = MAX_NAMES * sizeof(NameCountData);
         size_t total_size = (job_count + 1) * region_size;
+        size_t summation_offset = job_count * region_size;
 
         /*
          * Shared memory: create shared memory object.
@@ -420,8 +421,83 @@ main(void)
         }
 
         /*
-         * Shared-memory aggregation will be added here.
+         * Aggregate all child regions into the summation region.
          */
+        NameCountData *summation =
+            (NameCountData *)((char *)GLOBAL + summation_offset);
+
+        int summation_count = 0;
+
+        for (int child = 0; child < job_count; child++) {
+            NameCountData *child_data =
+                (NameCountData *)((char *)GLOBAL +
+                                  child * region_size);
+
+            /*
+             * Read this child's records until an empty name is found.
+             */
+            for (int i = 0; i < MAX_NAMES; i++) {
+                if (child_data[i].name[0] == '\0') {
+                    break;
+                }
+
+                int found = 0;
+
+                /*
+                 * Search for this name in the summation region.
+                 */
+                for (int j = 0; j < summation_count; j++) {
+                    if (strcmp(summation[j].name,
+                               child_data[i].name) == 0) {
+                        summation[j].count += child_data[i].count;
+                        found = 1;
+                        break;
+                    }
+                }
+
+                /*
+                 * If the name was not found, add a new record.
+                 */
+                if (!found) {
+                    if (summation_count >= MAX_NAMES - 1) {
+                        fprintf(stderr,
+                                "error: summation region is full\n");
+                        break;
+                    }
+
+                    memset(&summation[summation_count],
+                           0,
+                           sizeof(NameCountData));
+
+                    strncpy(summation[summation_count].name,
+                            child_data[i].name,
+                            MAX_NAME_LEN);
+
+                    summation[summation_count]
+                        .name[MAX_NAME_LEN] = '\0';
+
+                    summation[summation_count].count =
+                        child_data[i].count;
+
+                    summation_count++;
+                }
+            }
+        }
+
+        /*
+         * Mark the end of the summation records.
+         */
+        summation[summation_count].name[0] = '\0';
+        summation[summation_count].count = 0;
+
+        /*
+         * Print the final combined results.
+         */
+        for (int i = 0; i < summation_count; i++) {
+            printf("%s: %d\n",
+                   summation[i].name,
+                   summation[i].count);
+        }
 
         /*
          * Clean up the shared-memory mapping after all children finish.
