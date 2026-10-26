@@ -17,6 +17,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+// new headers needed, mman gives us mmap()
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 // define maxline since we arent using apue.h
 #define MAXLINE 1024
@@ -26,6 +29,12 @@
 
 // max length of a name; must match countnames.c
 #define MAX_NAME_LEN 30
+
+// max number of names in a region of memory
+# define MAX_NAMES 1000
+
+// name for shared memory object
+#define SHM_NAME "/countnames_shared_memory"
 
 /*
  * Record received from each child through the pipe (must match countnames.c).
@@ -163,6 +172,59 @@ main(void)
         int job_count = arg_count - 1;
         if (arg_count == 1) {
             job_count = 1;
+        }
+
+        /* Shared memory: each child gets a region, and final is a sum of all of them */
+        size_t region_size = MAX_NAMES * sizeof(NameCountData);
+        size_t total_size = (job_count + 1) * region_size;
+
+        /*Shared memory: create shared memory object */
+        int shm_fd = shm_open(
+            SHM_NAME, O_CREAT | O_RDWR, 0600
+        );
+
+        if (shm_fd == -1){
+            perror("shm_open failed");
+            printf("%% ");
+            fflush(stdout);
+            continue;
+        }
+
+        // set size of shared memory object
+        if (ftruncate(shm_fd, total_size) == -1) {
+            perror("ftruncate failed");
+            close(shm_fd);
+            shm_unlink(SHM_NAME);
+            printf("%% ");
+            fflush(stdout);
+            continue;
+        }
+
+        // map shared memory object to shell address space
+        void *GLOBAL = mmap(
+            NULL,
+            total_size,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            shm_fd,
+            0
+        );
+
+        if (GLOBAL == MAP_FAILED){
+            perror("mmap failed");
+            close(shm_fd);
+            shm_unlink(SHM_NAME);
+            printf("%% ");
+            fflush(stdout);
+            continue;
+        }
+
+        // initialize NameCountData to empty
+        NameCountData *global_data = (NameCountData *)GLOBAL;
+
+        for (size_t i = 0; i < total_size / sizeof(NameCountData); i++){
+            global_data[i].name[0] = '\0';
+            global_data[i].count = 0;
         }
 
         /*
