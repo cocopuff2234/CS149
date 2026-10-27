@@ -20,3 +20,12 @@ Assignment2/countnames
 Assignment2/shell.dSYM/
 Assignment2/*.out
 Assignment2/*.err
+
+# Assignment 4 generated files
+Assignment4/shell
+Assignment4/countnames
+Assignment4/bonus/shell
+Assignment4/bonus/countnames
+Assignment4/*.dSYM/
+Assignment4/bonus/*.dSYM/
+*.err
